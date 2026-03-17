@@ -61,14 +61,22 @@ class Repo(BaseModel):
     description: str
     language: str        # python | javascript | typescript
     stars: int
-    stars_delta: int     # stars gained this week (where available)
+    stars_delta: int     # stars gained this week; 0 if source does not provide this
     license: str         # mit | apache-2.0
     source: str          # github_trending | hackernews | reddit | github_search | papers_with_code | web_aggregators
-    discovered_at: datetime
+    discovered_at: datetime  # UTC
     topics: list[str]
     score: float
     why_notable: str     # human-readable reason (e.g. "312 new stars this week")
 ```
+
+**`stars_delta` calculation:**
+- `github_trending` and `github_search`: provided by GitHub API via the `stargazers` timeline endpoint. If unavailable, defaults to `0`.
+- `hackernews`, `reddit`, `web_aggregators`, `papers_with_code`: no historical star data available from the source; `stars_delta` defaults to `0`. These repos rely on topic relevance and source count for scoring instead.
+
+**License detection:** Uses the GitHub API `license` field (`repo.license.spdx_id`). Repos with `null` license or an unrecognised SPDX ID are rejected at the filter step.
+
+**`discovered_at`:** Always stored in UTC.
 
 ---
 
@@ -76,12 +84,14 @@ class Repo(BaseModel):
 
 | Source | Method | Notes |
 |---|---|---|
-| GitHub Trending | GitHub API / scrape | Filter by Python, JS, TS; daily & weekly trending |
-| Hacker News | Algolia HN API | Filter `Show HN` + `github.com` URLs from past 7 days |
-| Reddit | RSS feeds | r/LocalLLaMA, r/MachineLearning, r/artificial — filter for GitHub links |
-| GitHub Search | GitHub API | Topic-based search: `ai`, `agent`, `llm`, `sdlc`, `devops`, `eval`, `prompt` |
-| Papers with Code | PwC API | Repos linked to papers published in past 7 days |
-| Web Aggregators | HTTP scrape | console.dev, daily.dev GitHub repo entries |
+| `github_trending` | HTML scrape of `github.com/trending/{lang}?since=weekly` | Python, JS, TS — weekly view. No auth required. |
+| `hackernews` | Algolia HN API (`hn.algolia.com/api/v1/search`) | Filter `Show HN` + `github.com` URLs, past 7 days. Adapted from `mynewsletters/scrapers/api.py`. |
+| `reddit` | Reddit RSS feeds (no auth required as fallback) | r/LocalLLaMA, r/MachineLearning, r/artificial. RSS URLs: `https://www.reddit.com/r/{sub}/new.rss`. Filter entries containing `github.com`. Adapted from `mynewsletters/scrapers/api.py`. Optional: use Reddit OAuth API via `REDDIT_CLIENT_ID`/`SECRET` for richer metadata. |
+| `github_search` | GitHub REST API `/search/repositories` | Queries: `topic:llm`, `topic:ai-agent`, `topic:sdlc` etc. Sort by `stars`, filter `pushed:>={7_days_ago}`. Max 1000 results per query; paginate up to 3 pages. |
+| `papers_with_code` | PwC REST API `paperswithcode.com/api/v1/papers/` | Filter papers published in past 7 days with a linked GitHub repo. |
+| `web_aggregators` | console.dev RSS feed + daily.dev public API | `console.dev`: RSS at `https://console.dev/tools/rss.xml`. `daily.dev`: public GraphQL API — no scraping required, no TOS risk. Filter for GitHub repo links. |
+
+**Error handling:** Each scraper runs in an isolated matrix job. If a scraper fails (network error, rate limit, API change), the job marks itself as `continue-on-error: true`, uploads an empty `raw-{source}.json`, and the pipeline continues with the remaining sources. A warning is surfaced in the workflow summary. The overall workflow does not fail if at least one source produces results.
 
 ---
 
@@ -91,9 +101,11 @@ Applied in order, failing any check drops the repo:
 
 1. **Language:** Python, JavaScript, or TypeScript only
 2. **Stars:** ≥ 50 total
-3. **License:** MIT or Apache-2.0 only — hard reject AGPL, GPL, proprietary
-4. **Not seen before:** cross-check against `discovered-repos.json` cache
-5. **Relevance:** must match ≥ 1 topic keyword: `ai`, `agent`, `llm`, `sdlc`, `devops`, `eval`, `prompt`, `copilot`, `rag`, `mcp`, `workflow`, `pipeline`, `enterprise`
+3. **License:** MIT or Apache-2.0 only — hard reject AGPL, GPL, proprietary, or null
+4. **Relevance:** must match ≥ 1 topic keyword (case-insensitive, word-boundary match) in any of: `topics`, `description`, or repo `name`. Keywords: `ai`, `agent`, `llm`, `sdlc`, `devops`, `eval`, `prompt`, `copilot`, `rag`, `mcp`, `workflow`, `pipeline`, `enterprise`
+5. **Not seen before:** cross-check against `discovered-repos.json` cache. A repo that was seen in a prior run is **re-admitted** only if its `stars_delta ≥ 500` this week (major update signal). This check happens after all other filters.
+
+**First-run cache miss:** If no prior cache exists (first deployment), the cache file is treated as an empty set — all repos passing steps 1–4 are admitted. The cache is then saved at the end of the run.
 
 ---
 
@@ -101,12 +113,27 @@ Applied in order, failing any check drops the repo:
 
 Uses **GitHub Actions cache** (same pattern as `mynewsletters/summarize` job):
 
-- Cache key: `discovered-repos-v1-{run_id}`
-- Restore key prefix: `discovered-repos-v1-`
-- Cache file: `data/discovered-repos.json` — list of repo IDs (sha256 of URL) seen in all prior runs
-- On each run: restore latest cache → filter out known IDs → append new IDs → save updated cache
+- Cache key: `discovered-repos-v1-{run_id}` (unique per run, prevents overwriting mid-run)
+- Restore key prefix: `discovered-repos-v1-` (picks up the most recent prior run's cache)
+- Cache file: `data/discovered-repos.json` — list of repo IDs (sha256 of GitHub URL) seen in all prior runs
 
-A repo re-appears in the spotlight only if it has not been seen before **or** if its `stars_delta` exceeds 500 in a single week (major update signal).
+**Implementation in `deduplicate` job:**
+```yaml
+- uses: actions/cache/restore@v4       # explicit restore-only step
+  with:
+    path: data/discovered-repos.json
+    key: discovered-repos-v1-${{ github.run_id }}
+    restore-keys: discovered-repos-v1-
+
+# ... deduplication script runs here ...
+
+- uses: actions/cache/save@v4          # explicit save step in publish job
+  with:
+    path: data/discovered-repos.json
+    key: discovered-repos-v1-${{ github.run_id }}
+```
+
+The `restore` step is in the `deduplicate` job; the `save` step is in `publish` (after spotlight.json is committed), so the cache is only updated on a successful full run. On first run, the restore step finds no matching cache — the file is initialised as `[]`.
 
 ---
 
@@ -114,12 +141,12 @@ A repo re-appears in the spotlight only if it has not been seen before **or** if
 
 Repos are ranked by a weighted score:
 
-| Signal | Weight |
-|---|---|
-| `stars_delta` (weekly growth) | 40% |
-| Source count (seen in multiple sources) | 30% |
-| Topic relevance match count | 20% |
-| Recency (created in past 30 days) | 10% |
+| Signal | Weight | Calculation |
+|---|---|---|
+| `stars_delta` (weekly growth) | 40% | Normalised 0–1 across candidates in this run |
+| Source count (seen in multiple sources) | 30% | `min(source_count / 3, 1.0)` |
+| Topic relevance match count | 20% | `min(match_count / 5, 1.0)` |
+| Recency (created in past 30 days) | 10% | Binary: 1.0 if age ≤ 30 days, 0.0 otherwise |
 
 Top 5 repos per week are included in `spotlight.json`. If fewer than 1 repo passes all filters, `spotlight.json` is published with an empty `repos` array — the newsletter skips the spotlight section gracefully.
 
@@ -205,7 +232,16 @@ Minimal changes required:
   weight: high
 ```
 
-2. Add `scrapers/spotlight_fetcher.py` (~30 lines) — reads the JSON, maps each repo entry to a `Story` object for the existing pipeline.
+2. Add `scrapers/spotlight_fetcher.py` (~30 lines) — reads the JSON, maps each repo entry to a `Story` object for the existing pipeline using this mapping:
+
+| `Repo` field | → `Story` field |
+|---|---|
+| `name` + `why_notable` | → `title` (e.g. "owner/repo — 312 new stars this week") |
+| `url` | → `canonical_url` |
+| `"Repo Spotlight"` | → `sources[0].name` |
+| `url` | → `sources[0].url` |
+| `discovered_at` | → `published_at` |
+| `description` + topics + license + language | → `raw_content` (formatted string) |
 
 No other changes to `mynewsletters`.
 
