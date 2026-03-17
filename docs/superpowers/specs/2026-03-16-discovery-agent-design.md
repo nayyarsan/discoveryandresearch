@@ -35,7 +35,10 @@ discoveryandresearch/
 │   ├── reddit.py              # adapted from mynewsletters/scrapers/api.py
 │   ├── github_search.py
 │   ├── papers_with_code.py
-│   └── web_aggregators.py     # console.dev, daily.dev
+│   ├── web_aggregators.py     # console.dev, daily.dev
+│   ├── huggingface.py         # HF Hub new repos/spaces
+│   ├── lobsters.py            # lobste.rs RSS
+│   └── awesome_lists.py       # git diff on curated awesome lists
 ├── pipeline/
 │   ├── filter.py
 │   ├── deduplicate.py
@@ -63,7 +66,7 @@ class Repo(BaseModel):
     stars: int
     stars_delta: int     # stars gained this week; 0 if source does not provide this
     license: str         # mit | apache-2.0
-    source: str          # github_trending | hackernews | reddit | github_search | papers_with_code | web_aggregators
+    source: str          # github_trending | hackernews | reddit | github_search | papers_with_code | web_aggregators | huggingface | lobsters | awesome_lists
     discovered_at: datetime  # UTC
     topics: list[str]
     score: float
@@ -72,7 +75,7 @@ class Repo(BaseModel):
 
 **`stars_delta` calculation:**
 - `github_trending` and `github_search`: provided by GitHub API via the `stargazers` timeline endpoint. If unavailable, defaults to `0`.
-- `hackernews`, `reddit`, `web_aggregators`, `papers_with_code`: no historical star data available from the source; `stars_delta` defaults to `0`. These repos rely on topic relevance and source count for scoring instead.
+- `hackernews`, `reddit`, `web_aggregators`, `papers_with_code`, `huggingface`, `lobsters`, `awesome_lists`: no historical star data available from the source; `stars_delta` defaults to `0`. These repos rely on topic relevance and source count for scoring instead.
 
 **License detection:** Uses the GitHub API `license` field (`repo.license.spdx_id`). Repos with `null` license or an unrecognised SPDX ID are rejected at the filter step.
 
@@ -90,6 +93,20 @@ class Repo(BaseModel):
 | `github_search` | GitHub REST API `/search/repositories` | Queries: `topic:llm`, `topic:ai-agent`, `topic:sdlc` etc. Sort by `stars`, filter `pushed:>={7_days_ago}`. Max 1000 results per query; paginate up to 3 pages. |
 | `papers_with_code` | PwC REST API `paperswithcode.com/api/v1/papers/` | Filter papers published in past 7 days with a linked GitHub repo. |
 | `web_aggregators` | console.dev RSS feed + daily.dev public API | `console.dev`: RSS at `https://console.dev/tools/rss.xml`. `daily.dev`: public GraphQL API — no scraping required, no TOS risk. Filter for GitHub repo links. |
+| `huggingface` | Hugging Face Hub API | `huggingface.co/api/models` and `/spaces` — filter by `createdAt >= 7 days ago`, sort by likes. Extract linked GitHub repos from model cards. No auth required for public data. |
+| `lobsters` | RSS feed | `https://lobste.rs/t/ai.rss`, `https://lobste.rs/t/programming.rss` — filter entries containing `github.com`. Higher signal/noise than HN for technical repos. |
+| `awesome_lists` | GitHub Commits API | Monitor git commits to 5 curated lists (see below). Extract only **newly added lines** containing GitHub URLs via diff. Signal: a repo just added to an awesome list by the community. |
+
+**Monitored awesome lists:**
+| List | Repo | Focus |
+|---|---|---|
+| Awesome AI Agents | `e2b-dev/awesome-ai-agents` | AI agents and frameworks |
+| Awesome LLM | `Hannibal046/Awesome-LLM` | LLM tools and frameworks |
+| Awesome MLOps | `visenger/awesome-mlops` | MLOps practices and tooling |
+| Awesome LLM Eval | `onejune2018/Awesome-LLM-Eval` | Evaluation frameworks |
+| Awesome MCP Servers | `punkpeye/awesome-mcp-servers` | MCP servers and integrations |
+
+For each list: fetch commits from the past 7 days via `GET /repos/{owner}/{repo}/commits?since={7_days_ago}`, then fetch the diff for each commit, extract `+` lines containing `github.com`, parse out the repo URL.
 
 **Error handling:** Each scraper runs in an isolated matrix job. If a scraper fails (network error, rate limit, API change), the job marks itself as `continue-on-error: true`, uploads an empty `raw-{source}.json`, and the pipeline continues with the remaining sources. A warning is surfaced in the workflow summary. The overall workflow does not fail if at least one source produces results.
 
