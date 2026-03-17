@@ -16,10 +16,11 @@
 |---|---|
 | `schemas/repo.py` | `Repo` pydantic model — single source of truth for data shape |
 | `scrapers/base.py` | `BaseScraper` ABC — enforces `scrape() -> list[Repo]` interface |
-| `scrapers/github_trending.py` | HTML scrape of github.com/trending |
-| `scrapers/hackernews.py` | Algolia HN API, Show HN + github.com filter |
-| `scrapers/reddit.py` | RSS feeds for 3 subreddits, github.com link filter |
-| `scrapers/lobsters.py` | RSS feed, github.com link filter |
+| `scrapers/_http.py` | Shared HTTP/feed utilities — **copied and adapted from `mynewsletters/scrapers/`** (`fetch_rss_entries`, `fetch_hackernews_hits`, `fetch_html_page`, `fetch_github_api`) |
+| `scrapers/github_trending.py` | HTML scrape of github.com/trending — uses `_http.fetch_html_page` |
+| `scrapers/hackernews.py` | Algolia HN API — uses `_http.fetch_hackernews_hits` (adapted from `mynewsletters/scrapers/api.py`) |
+| `scrapers/reddit.py` | RSS feeds for 3 subreddits, github.com link filter — uses `_http.fetch_rss_entries` (adapted from `mynewsletters/scrapers/api.py`), **RSS only, no OAuth** |
+| `scrapers/lobsters.py` | RSS feed — uses `_http.fetch_rss_entries` (adapted from `mynewsletters/scrapers/rss.py`) |
 | `scrapers/github_search.py` | GitHub REST API topic queries |
 | `scrapers/papers_with_code.py` | PwC API, papers with linked GitHub repos |
 | `scrapers/huggingface.py` | HF Hub API, new repos/spaces with GitHub links |
@@ -344,6 +345,121 @@ git commit -m "feat: BaseScraper ABC and shared test fixtures"
 
 ---
 
+### Task 3b: Shared HTTP/feed utilities (`scrapers/_http.py`)
+
+**Copied and adapted from `nayyarsan/mynewsletters` — do NOT rewrite from scratch.**
+
+**Files:**
+- Create: `scrapers/_http.py`
+- Source reference: `mynewsletters/scrapers/api.py`, `mynewsletters/scrapers/rss.py`, `mynewsletters/scrapers/html.py`
+
+- [ ] **Step 1: Create `scrapers/_http.py`** — adapt the four helpers below from the newsletter, replacing `Story` returns with raw dicts/lists that scrapers can work with
+
+```python
+# scrapers/_http.py
+"""Shared HTTP and feed utilities.
+Adapted from nayyarsan/mynewsletters/scrapers/ (api.py, rss.py, html.py).
+Returns raw data (dicts, feedparser entries) — scrapers own the Repo construction.
+"""
+import re
+import httpx
+import feedparser
+from datetime import datetime, timezone, timedelta
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DiscoveryAgent/1.0)"}
+GITHUB_RE = re.compile(r"https?://github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)")
+
+
+def fetch_rss_entries(
+    url: str,
+    client: httpx.Client,
+    max_age_days: int = 7,
+) -> list:
+    """Return feedparser entries from an RSS/Atom feed, filtered to max_age_days.
+    Adapted from mynewsletters/scrapers/rss.py::fetch_rss().
+    Returns [] on any error."""
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=max_age_days)
+    try:
+        resp = client.get(url)
+        resp.raise_for_status()
+        feed = feedparser.parse(resp.text)
+        if feed.bozo and not feed.entries:
+            return []
+    except Exception:
+        return []
+
+    entries = []
+    for entry in feed.entries:
+        t = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+        if t:
+            published_at = datetime(t[0], t[1], t[2], t[3], t[4], t[5], tzinfo=timezone.utc)
+            if published_at < cutoff:
+                continue
+        entries.append(entry)
+    return entries
+
+
+def fetch_hackernews_hits(
+    client: httpx.Client,
+    lookback_days: int = 7,
+) -> list[dict]:
+    """Return HN Algolia API hits for Show HN posts containing github.com.
+    Adapted from mynewsletters/scrapers/api.py::fetch_hackernews().
+    Returns [] on any error."""
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=lookback_days)
+    try:
+        resp = client.get(
+            "https://hn.algolia.com/api/v1/search",
+            params={
+                "query": "Show HN github.com",
+                "tags": "show_hn",
+                "numericFilters": f"created_at_i>{int(cutoff.timestamp())}",
+                "hitsPerPage": 50,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json().get("hits", [])
+    except Exception:
+        return []
+
+
+def fetch_github_api(path: str, client: httpx.Client) -> dict | None:
+    """Fetch a GitHub repo's metadata via REST API. Returns None on error.
+    Used by all scrapers to validate license, language, stars."""
+    try:
+        resp = client.get(
+            f"https://api.github.com/repos/{path}",
+            headers={**HEADERS, "Accept": "application/vnd.github+json"},
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
+def extract_github_paths(text: str) -> list[str]:
+    """Return all unique 'owner/repo' paths found in text."""
+    return list(dict.fromkeys(
+        m.group(1).rstrip("/") for m in GITHUB_RE.finditer(text)
+    ))
+```
+
+- [ ] **Step 2: Verify it imports cleanly**
+
+```bash
+python -c "from scrapers._http import fetch_rss_entries, fetch_hackernews_hits, fetch_github_api, extract_github_paths; print('ok')"
+```
+Expected: `ok`
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add scrapers/_http.py
+git commit -m "feat: shared HTTP/feed utilities (adapted from mynewsletters)"
+```
+
+---
+
 ## Chunk 2: Simple Scrapers (Trending, HN, Reddit, Lobste.rs)
 
 ### Task 4: GitHub Trending scraper
@@ -429,8 +545,8 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 from schemas.repo import Repo, ALLOWED_LICENSES
 from scrapers.base import BaseScraper
+from scrapers._http import HEADERS, fetch_github_api
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DiscoveryAgent/1.0)"}
 LANGUAGES = ["python", "javascript", "typescript"]
 
 
@@ -473,7 +589,7 @@ class GitHubTrendingScraper(BaseScraper):
                 stars_delta = int(delta_match.group(1).replace(",", "")) if delta_match else 0
 
                 # Fetch full repo details from GitHub API for license, language, stars
-                repo_data = self._fetch_repo_api(path)
+                repo_data = fetch_github_api(path, self._client)
                 if not repo_data:
                     continue
 
@@ -501,14 +617,6 @@ class GitHubTrendingScraper(BaseScraper):
             except Exception:
                 continue
         return repos
-
-    def _fetch_repo_api(self, path: str) -> dict | None:
-        try:
-            resp = self._client.get(f"https://api.github.com/repos/{path}")
-            resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
 ```
 
 - [ ] **Step 4: Run test — expect PASS**
@@ -603,12 +711,10 @@ pytest tests/scrapers/test_hackernews.py -v
 
 ```python
 import httpx
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from schemas.repo import Repo, ALLOWED_LICENSES
 from scrapers.base import BaseScraper
-
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DiscoveryAgent/1.0)"}
-HN_API = "https://hn.algolia.com/api/v1/search"
+from scrapers._http import HEADERS, fetch_hackernews_hits, fetch_github_api, extract_github_paths
 
 
 class HackerNewsScraper(BaseScraper):
@@ -617,28 +723,18 @@ class HackerNewsScraper(BaseScraper):
         self._lookback_days = lookback_days
 
     def scrape(self) -> list[Repo]:
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=self._lookback_days)
-        try:
-            resp = self._client.get(HN_API, params={
-                "query": "Show HN github.com",
-                "tags": "show_hn",
-                "numericFilters": f"created_at_i>{int(cutoff.timestamp())}",
-                "hitsPerPage": 50,
-            })
-            resp.raise_for_status()
-            hits = resp.json().get("hits", [])
-        except Exception:
-            return []
+        hits = fetch_hackernews_hits(self._client, self._lookback_days)
 
         repos = []
         for hit in hits:
             url = hit.get("url") or ""
             if "github.com" not in url:
                 continue
-            path = self._extract_repo_path(url)
-            if not path:
+            paths = extract_github_paths(url)
+            if not paths:
                 continue
-            repo_data = self._fetch_repo_api(path)
+            path = paths[0]
+            repo_data = fetch_github_api(path, self._client)
             if not repo_data:
                 continue
             license_id = (repo_data.get("license") or {}).get("spdx_id", "").lower()
@@ -665,20 +761,6 @@ class HackerNewsScraper(BaseScraper):
                 why_notable=f"Featured on Hacker News: {hit.get('title', '')}",
             ))
         return repos
-
-    def _extract_repo_path(self, url: str) -> str | None:
-        """Extract 'owner/repo' from a github.com URL."""
-        import re
-        m = re.match(r"https?://github\.com/([^/]+/[^/?\s#]+)", url)
-        return m.group(1) if m else None
-
-    def _fetch_repo_api(self, path: str) -> dict | None:
-        try:
-            resp = self._client.get(f"https://api.github.com/repos/{path}")
-            resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
 ```
 
 - [ ] **Step 4: Run test — expect PASS**
@@ -773,16 +855,13 @@ pytest tests/scrapers/test_reddit.py -v
 - [ ] **Step 3: Implement `scrapers/reddit.py`**
 
 ```python
-import re
 import httpx
-import feedparser
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from schemas.repo import Repo, ALLOWED_LICENSES
 from scrapers.base import BaseScraper
+from scrapers._http import HEADERS, fetch_rss_entries, fetch_github_api, extract_github_paths
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DiscoveryAgent/1.0)"}
 SUBREDDITS = ["LocalLLaMA", "MachineLearning", "artificial"]
-GITHUB_RE = re.compile(r"https?://github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)")
 
 
 class RedditScraper(BaseScraper):
@@ -791,54 +870,40 @@ class RedditScraper(BaseScraper):
         self._lookback_days = lookback_days
 
     def scrape(self) -> list[Repo]:
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=self._lookback_days)
         seen_paths: set[str] = set()
         repos: list[Repo] = []
         for sub in SUBREDDITS:
-            try:
-                resp = self._client.get(f"https://www.reddit.com/r/{sub}/new.rss")
-                resp.raise_for_status()
-                feed = feedparser.parse(resp.text)
-                for entry in feed.entries:
-                    text = f"{getattr(entry, 'link', '')} {getattr(entry, 'summary', '')}"
-                    for match in GITHUB_RE.finditer(text):
-                        path = match.group(1).rstrip("/")
-                        if path in seen_paths:
-                            continue
-                        seen_paths.add(path)
-                        repo_data = self._fetch_repo_api(path)
-                        if not repo_data:
-                            continue
-                        license_id = (repo_data.get("license") or {}).get("spdx_id", "").lower()
-                        if license_id not in ALLOWED_LICENSES:
-                            continue
-                        language = (repo_data.get("language") or "").lower()
-                        if language not in {"python", "javascript", "typescript"}:
-                            continue
-                        repos.append(Repo(
-                            name=path,
-                            url=f"https://github.com/{path}",
-                            description=repo_data.get("description") or "",
-                            language=language,
-                            stars=repo_data.get("stargazers_count", 0),
-                            stars_delta=0,
-                            license=license_id,
-                            source="reddit",
-                            discovered_at=datetime.now(tz=timezone.utc),
-                            topics=repo_data.get("topics") or [],
-                            why_notable=f"Discussed on r/{sub}",
-                        ))
-            except Exception:
-                continue
+            url = f"https://www.reddit.com/r/{sub}/new.rss"
+            entries = fetch_rss_entries(url, self._client, max_age_days=self._lookback_days)
+            for entry in entries:
+                text = f"{getattr(entry, 'link', '')} {getattr(entry, 'summary', '')}"
+                for path in extract_github_paths(text):
+                    if path in seen_paths:
+                        continue
+                    seen_paths.add(path)
+                    repo_data = fetch_github_api(path, self._client)
+                    if not repo_data:
+                        continue
+                    license_id = (repo_data.get("license") or {}).get("spdx_id", "").lower()
+                    if license_id not in ALLOWED_LICENSES:
+                        continue
+                    language = (repo_data.get("language") or "").lower()
+                    if language not in {"python", "javascript", "typescript"}:
+                        continue
+                    repos.append(Repo(
+                        name=path,
+                        url=f"https://github.com/{path}",
+                        description=repo_data.get("description") or "",
+                        language=language,
+                        stars=repo_data.get("stargazers_count", 0),
+                        stars_delta=0,
+                        license=license_id,
+                        source="reddit",
+                        discovered_at=datetime.now(tz=timezone.utc),
+                        topics=repo_data.get("topics") or [],
+                        why_notable=f"Discussed on r/{sub}",
+                    ))
         return repos
-
-    def _fetch_repo_api(self, path: str) -> dict | None:
-        try:
-            resp = self._client.get(f"https://api.github.com/repos/{path}")
-            resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
 ```
 
 - [ ] **Step 4: Run test — expect PASS**
@@ -913,16 +978,13 @@ pytest tests/scrapers/test_lobsters.py -v
 - [ ] **Step 3: Implement `scrapers/lobsters.py`**
 
 ```python
-import re
 import httpx
-import feedparser
 from datetime import datetime, timezone
 from schemas.repo import Repo, ALLOWED_LICENSES
 from scrapers.base import BaseScraper
+from scrapers._http import HEADERS, fetch_rss_entries, fetch_github_api, extract_github_paths
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DiscoveryAgent/1.0)"}
 TAGS = ["ai", "programming"]
-GITHUB_RE = re.compile(r"https?://github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)")
 
 
 class LobstersScraper(BaseScraper):
@@ -933,52 +995,40 @@ class LobstersScraper(BaseScraper):
         seen: set[str] = set()
         repos: list[Repo] = []
         for tag in TAGS:
-            try:
-                resp = self._client.get(f"https://lobste.rs/t/{tag}.rss")
-                resp.raise_for_status()
-                feed = feedparser.parse(resp.text)
-                for entry in feed.entries:
-                    link = getattr(entry, "link", "") or ""
-                    m = GITHUB_RE.match(link)
-                    if not m:
-                        continue
-                    path = m.group(1).rstrip("/")
-                    if path in seen:
-                        continue
-                    seen.add(path)
-                    repo_data = self._fetch_repo_api(path)
-                    if not repo_data:
-                        continue
-                    license_id = (repo_data.get("license") or {}).get("spdx_id", "").lower()
-                    if license_id not in ALLOWED_LICENSES:
-                        continue
-                    language = (repo_data.get("language") or "").lower()
-                    if language not in {"python", "javascript", "typescript"}:
-                        continue
-                    repos.append(Repo(
-                        name=path,
-                        url=f"https://github.com/{path}",
-                        description=repo_data.get("description") or "",
-                        language=language,
-                        stars=repo_data.get("stargazers_count", 0),
-                        stars_delta=0,
-                        license=license_id,
-                        source="lobsters",
-                        discovered_at=datetime.now(tz=timezone.utc),
-                        topics=repo_data.get("topics") or [],
-                        why_notable=f"Featured on Lobste.rs: {getattr(entry, 'title', '')}",
-                    ))
-            except Exception:
-                continue
+            url = f"https://lobste.rs/t/{tag}.rss"
+            entries = fetch_rss_entries(url, self._client)
+            for entry in entries:
+                link = getattr(entry, "link", "") or ""
+                paths = extract_github_paths(link)
+                if not paths:
+                    continue
+                path = paths[0]
+                if path in seen:
+                    continue
+                seen.add(path)
+                repo_data = fetch_github_api(path, self._client)
+                if not repo_data:
+                    continue
+                license_id = (repo_data.get("license") or {}).get("spdx_id", "").lower()
+                if license_id not in ALLOWED_LICENSES:
+                    continue
+                language = (repo_data.get("language") or "").lower()
+                if language not in {"python", "javascript", "typescript"}:
+                    continue
+                repos.append(Repo(
+                    name=path,
+                    url=f"https://github.com/{path}",
+                    description=repo_data.get("description") or "",
+                    language=language,
+                    stars=repo_data.get("stargazers_count", 0),
+                    stars_delta=0,
+                    license=license_id,
+                    source="lobsters",
+                    discovered_at=datetime.now(tz=timezone.utc),
+                    topics=repo_data.get("topics") or [],
+                    why_notable=f"Featured on Lobste.rs: {getattr(entry, 'title', '')}",
+                ))
         return repos
-
-    def _fetch_repo_api(self, path: str) -> dict | None:
-        try:
-            resp = self._client.get(f"https://api.github.com/repos/{path}")
-            resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
 ```
 
 - [ ] **Step 4: Run test — expect PASS**
@@ -1210,8 +1260,8 @@ import httpx
 from datetime import datetime, timezone, timedelta
 from schemas.repo import Repo, ALLOWED_LICENSES
 from scrapers.base import BaseScraper
+from scrapers._http import HEADERS, fetch_github_api
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DiscoveryAgent/1.0)"}
 GITHUB_RE = re.compile(r"github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)")
 
 
@@ -1244,7 +1294,7 @@ class PapersWithCodeScraper(BaseScraper):
             if not m:
                 continue
             path = m.group(1).rstrip("/")
-            repo_data = self._fetch_repo_api(path)
+            repo_data = fetch_github_api(path, self._client)
             if not repo_data:
                 continue
             license_id = (repo_data.get("license") or {}).get("spdx_id", "").lower()
@@ -1267,14 +1317,6 @@ class PapersWithCodeScraper(BaseScraper):
                 why_notable=f"Code for paper: {paper.get('title', '')}",
             ))
         return repos
-
-    def _fetch_repo_api(self, path: str) -> dict | None:
-        try:
-            resp = self._client.get(f"https://api.github.com/repos/{path}")
-            resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
 ```
 
 - [ ] **Step 4: Run test — expect PASS**
@@ -1360,8 +1402,8 @@ import httpx
 from datetime import datetime, timezone, timedelta
 from schemas.repo import Repo, ALLOWED_LICENSES
 from scrapers.base import BaseScraper
+from scrapers._http import HEADERS, fetch_github_api
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DiscoveryAgent/1.0)"}
 GITHUB_RE = re.compile(r"github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)")
 
 
@@ -1399,7 +1441,7 @@ class HuggingFaceScraper(BaseScraper):
                 if path in seen:
                     continue
                 seen.add(path)
-                repo_data = self._fetch_repo_api(path)
+                repo_data = fetch_github_api(path, self._client)
                 if not repo_data:
                     continue
                 license_id = (repo_data.get("license") or {}).get("spdx_id", "").lower()
@@ -1422,14 +1464,6 @@ class HuggingFaceScraper(BaseScraper):
                     why_notable=f"Linked from Hugging Face {endpoint[:-1]}: {item.get('id', '')}",
                 ))
         return repos
-
-    def _fetch_repo_api(self, path: str) -> dict | None:
-        try:
-            resp = self._client.get(f"https://api.github.com/repos/{path}")
-            resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
 ```
 
 - [ ] **Step 4: Run test — expect PASS**
@@ -1532,8 +1566,8 @@ import feedparser
 from datetime import datetime, timezone
 from schemas.repo import Repo, ALLOWED_LICENSES
 from scrapers.base import BaseScraper
+from scrapers._http import HEADERS, fetch_github_api
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DiscoveryAgent/1.0)"}
 GITHUB_RE = re.compile(r"https?://github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)")
 
 DAILY_DEV_QUERY = """
@@ -1607,7 +1641,7 @@ class WebAggregatorsScraper(BaseScraper):
         return repos
 
     def _build_repo(self, path: str, why_notable: str) -> Repo | None:
-        repo_data = self._fetch_repo_api(path)
+        repo_data = fetch_github_api(path, self._client)
         if not repo_data:
             return None
         license_id = (repo_data.get("license") or {}).get("spdx_id", "").lower()
@@ -1629,14 +1663,6 @@ class WebAggregatorsScraper(BaseScraper):
             topics=repo_data.get("topics") or [],
             why_notable=why_notable,
         )
-
-    def _fetch_repo_api(self, path: str) -> dict | None:
-        try:
-            resp = self._client.get(f"https://api.github.com/repos/{path}")
-            resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
 ```
 
 - [ ] **Step 4: Run test — expect PASS**
@@ -1747,8 +1773,8 @@ import httpx
 from datetime import datetime, timezone, timedelta
 from schemas.repo import Repo, ALLOWED_LICENSES
 from scrapers.base import BaseScraper
+from scrapers._http import HEADERS, fetch_github_api
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DiscoveryAgent/1.0)"}
 GITHUB_RE = re.compile(r"https?://github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)")
 
 AWESOME_LISTS = [
@@ -1780,7 +1806,7 @@ class AwesomeListsScraper(BaseScraper):
                     if path in seen:
                         continue
                     seen.add(path)
-                    repo_data = self._fetch_repo_api(path)
+                    repo_data = fetch_github_api(path, self._client)
                     if not repo_data:
                         continue
                     license_id = (repo_data.get("license") or {}).get("spdx_id", "").lower()
@@ -1826,14 +1852,6 @@ class AwesomeListsScraper(BaseScraper):
                     for m in GITHUB_RE.finditer(line):
                         urls.append((m.group(0), list_repo.split("/")[1]))
         return urls
-
-    def _fetch_repo_api(self, path: str) -> dict | None:
-        try:
-            resp = self._client.get(f"https://api.github.com/repos/{path}")
-            resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
 ```
 
 - [ ] **Step 4: Run test — expect PASS**
@@ -2603,8 +2621,6 @@ jobs:
         run: python pipeline/run.py --pipeline
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
-          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
 
       - name: Save dedup cache
         uses: actions/cache/save@v4
