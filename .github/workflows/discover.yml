@@ -15,6 +15,7 @@ jobs:
 
   scrape:
     runs-on: ubuntu-latest
+    continue-on-error: true
     strategy:
       matrix:
         source:
@@ -71,6 +72,12 @@ jobs:
           key: discovered-repos-v1-${{ github.run_id }}
           restore-keys: discovered-repos-v1-
 
+      - name: Restore all-discovered.json from gh-pages
+        run: |
+          git fetch origin gh-pages 2>/dev/null || true
+          git show origin/gh-pages:all-discovered.json > data/all-discovered.json 2>/dev/null || true
+          mkdir -p data
+
       - name: Run pipeline
         run: python pipeline/run.py --pipeline
         env:
@@ -98,11 +105,11 @@ jobs:
 
       - name: Publish index.html to gh-pages branch
         run: |
-          git checkout ${{ github.sha }} -- data/index.html data/all-discovered.json 2>/dev/null || true
           git fetch origin gh-pages 2>/dev/null || true
           git checkout gh-pages 2>/dev/null || git checkout --orphan gh-pages
           git rm -rf . 2>/dev/null || true
           cp ${{ github.workspace }}/data/index.html index.html
-          git add index.html
+          cp ${{ github.workspace }}/data/all-discovered.json all-discovered.json
+          git add index.html all-discovered.json
           git commit -m "chore: update GitHub Pages [$(date -u +%Y-%m-%d)]" || echo "No changes"
           git push origin gh-pages
