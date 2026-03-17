@@ -1,0 +1,108 @@
+name: Repo Discovery
+
+on:
+  schedule:
+    - cron: '0 22 * * 0'   # Sunday 10pm UTC (4h before Monday newsletter)
+  workflow_dispatch:         # Manual trigger for testing
+
+permissions:
+  contents: write            # Needed to push to output + gh-pages branches
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+
+  scrape:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        source:
+          - github_trending
+          - hackernews
+          - reddit
+          - lobsters
+          - github_search
+          - papers_with_code
+          - huggingface
+          - web_aggregators
+          - awesome_lists
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Scrape ${{ matrix.source }}
+        run: python pipeline/run.py --source "${{ matrix.source }}" --output-dir data/raw
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raw-${{ matrix.source }}
+          path: data/raw/${{ matrix.source }}.json
+          if-no-files-found: warn
+
+  pipeline:
+    needs: scrape
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # Full history needed for branch operations
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: raw-*
+          merge-multiple: true
+          path: data/raw/
+
+      - name: Restore dedup cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/discovered-repos.json
+          key: discovered-repos-v1-${{ github.run_id }}
+          restore-keys: discovered-repos-v1-
+
+      - name: Run pipeline
+        run: python pipeline/run.py --pipeline
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Save dedup cache
+        uses: actions/cache/save@v4
+        with:
+          path: data/discovered-repos.json
+          key: discovered-repos-v1-${{ github.run_id }}
+
+      - name: Publish spotlight.json to output branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Create orphan output branch if it doesn't exist
+          git fetch origin output 2>/dev/null || true
+          git checkout output 2>/dev/null || git checkout --orphan output
+          git rm -rf . 2>/dev/null || true
+          mkdir -p data
+          cp ${{ github.workspace }}/data/spotlight.json data/spotlight.json
+          git add data/spotlight.json
+          git commit -m "chore: update spotlight.json [$(date -u +%Y-%m-%d)]" || echo "No changes"
+          git push origin output
+
+      - name: Publish index.html to gh-pages branch
+        run: |
+          git checkout ${{ github.sha }} -- data/index.html data/all-discovered.json 2>/dev/null || true
+          git fetch origin gh-pages 2>/dev/null || true
+          git checkout gh-pages 2>/dev/null || git checkout --orphan gh-pages
+          git rm -rf . 2>/dev/null || true
+          cp ${{ github.workspace }}/data/index.html index.html
+          git add index.html
+          git commit -m "chore: update GitHub Pages [$(date -u +%Y-%m-%d)]" || echo "No changes"
+          git push origin gh-pages
