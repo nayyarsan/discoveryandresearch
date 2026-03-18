@@ -24,9 +24,7 @@ jobs:
           - reddit
           - lobsters
           - github_search
-          - papers_with_code
           - huggingface
-          - web_aggregators
           - awesome_lists
       fail-fast: false
     steps:

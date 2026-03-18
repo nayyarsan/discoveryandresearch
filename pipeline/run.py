@@ -16,9 +16,7 @@ def run_scraper(source: str, output_dir: str) -> None:
     from scrapers.reddit import RedditScraper
     from scrapers.lobsters import LobstersScraper
     from scrapers.github_search import GitHubSearchScraper
-    from scrapers.papers_with_code import PapersWithCodeScraper
     from scrapers.huggingface import HuggingFaceScraper
-    from scrapers.web_aggregators import WebAggregatorsScraper
     from scrapers.awesome_lists import AwesomeListsScraper
 
     scrapers = {
@@ -27,9 +25,7 @@ def run_scraper(source: str, output_dir: str) -> None:
         "reddit": RedditScraper,
         "lobsters": LobstersScraper,
         "github_search": GitHubSearchScraper,
-        "papers_with_code": PapersWithCodeScraper,
         "huggingface": HuggingFaceScraper,
-        "web_aggregators": WebAggregatorsScraper,
         "awesome_lists": AwesomeListsScraper,
     }
     if source not in scrapers:
