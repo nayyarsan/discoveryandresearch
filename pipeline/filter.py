@@ -6,6 +6,14 @@ DEFAULT_KEYWORDS = [
     "copilot", "rag", "mcp", "workflow", "pipeline", "enterprise",
 ]
 
+# Repos whose topics include any of these are dropped — learning resources,
+# not production tools.
+EXCLUDE_TOPICS = {
+    "tutorial", "tutorials", "educational", "education",
+    "teaching", "learning", "course", "beginner", "workshop",
+    "example", "examples", "demo", "demos",
+}
+
 
 def filter_repos(
     repos: list[Repo],
@@ -21,6 +29,8 @@ def filter_repos(
             continue
         searchable = " ".join([repo.name, repo.description, " ".join(repo.topics)])
         if not any(p.search(searchable) for p in patterns):
+            continue
+        if EXCLUDE_TOPICS.intersection({t.lower() for t in repo.topics}):
             continue
         result.append(repo)
     return result
