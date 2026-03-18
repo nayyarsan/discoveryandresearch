@@ -91,23 +91,30 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Create orphan output branch if it doesn't exist
+          # Stash outputs before switching branches (data/ is gitignored, stays in workdir)
+          SPOTLIGHT=$(cat data/spotlight.json)
+          INDEX_HTML=$(cat data/index.html)
+          ALL_DISC=$(cat data/all-discovered.json)
+          # Switch to orphan output branch
           git fetch origin output 2>/dev/null || true
           git checkout output 2>/dev/null || git checkout --orphan output
           git rm -rf . 2>/dev/null || true
           mkdir -p data
-          cp ${{ github.workspace }}/data/spotlight.json data/spotlight.json
+          echo "$SPOTLIGHT" > data/spotlight.json
           git add data/spotlight.json
           git commit -m "chore: update spotlight.json [$(date -u +%Y-%m-%d)]" || echo "No changes"
           git push origin output
+          # Restore env for gh-pages step
+          echo "$INDEX_HTML" > /tmp/index.html
+          echo "$ALL_DISC" > /tmp/all-discovered.json
 
       - name: Publish index.html to gh-pages branch
         run: |
           git fetch origin gh-pages 2>/dev/null || true
           git checkout gh-pages 2>/dev/null || git checkout --orphan gh-pages
           git rm -rf . 2>/dev/null || true
-          cp ${{ github.workspace }}/data/index.html index.html
-          cp ${{ github.workspace }}/data/all-discovered.json all-discovered.json
+          cp /tmp/index.html index.html
+          cp /tmp/all-discovered.json all-discovered.json
           git add index.html all-discovered.json
           git commit -m "chore: update GitHub Pages [$(date -u +%Y-%m-%d)]" || echo "No changes"
           git push origin gh-pages
