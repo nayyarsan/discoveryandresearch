@@ -21,6 +21,8 @@ def write_spotlight_json(repos: list[Repo], path: str = "data/spotlight.json") -
                 "topics": r.topics,
                 "why_notable": r.why_notable,
                 "source": r.source,
+                "relevance_score": r.relevance_score,
+                "relevance_reason": r.relevance_reason,
             }
             for r in repos
         ],
