@@ -47,7 +47,7 @@ def run_pipeline(raw_dir: str = "data/raw") -> None:
     from schemas.repo import Repo
     from pipeline.filter import filter_repos
     from pipeline.deduplicate import deduplicate, load_seen_ids, save_seen_ids
-    from pipeline.score import score_and_rank
+    from pipeline.score import score_and_rank, score_relevance
     from pipeline.publish import write_spotlight_json
     from pages.build import build_index_html
 
@@ -89,6 +89,10 @@ def run_pipeline(raw_dir: str = "data/raw") -> None:
     # Score and rank
     top_repos = score_and_rank(new_repos, top_n=5)
     print(f"Top repos: {len(top_repos)}")
+
+    # Relevance scoring against the tech stack
+    top_repos = score_relevance(top_repos)
+    print("Relevance scoring complete")
 
     # Publish spotlight.json
     write_spotlight_json(top_repos)

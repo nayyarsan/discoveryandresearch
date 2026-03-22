@@ -23,6 +23,8 @@ class Repo(BaseModel):
     topics: list[str]
     score: float = 0.0
     why_notable: str
+    relevance_score: float = 0.0
+    relevance_reason: str = ""
     source_count: int = 1  # incremented when same repo found in multiple sources
 
     @computed_field
