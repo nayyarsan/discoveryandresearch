@@ -1,6 +1,6 @@
 import hashlib
 from datetime import datetime
-from pydantic import BaseModel, computed_field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 ALLOWED_LICENSES = {"mit", "apache-2.0"}
 ALLOWED_LANGUAGES = {"python", "javascript", "typescript"}
@@ -25,6 +25,7 @@ class Repo(BaseModel):
     why_notable: str
     relevance_score: float = 0.0
     relevance_reason: str = ""
+    recommendation: dict = Field(default_factory=dict)
     source_count: int = 1  # incremented when same repo found in multiple sources
 
     @computed_field
